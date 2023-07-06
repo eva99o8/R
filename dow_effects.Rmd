@@ -1,0 +1,157 @@
+---
+title: "dow effect"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(mvtnorm)
+library(rstan)
+library(dplyr)
+options(mc.cores = parallel::detectCores())
+source("Loading_real_data.R")
+source(("user_defined_funcs.R"))
+source(("Y_sim_generate.R"))
+```
+
+```{r cars}
+## find day of week effects from raw data
+path_data= "D:\\WPI\\22summer\\Iterative Fitting(Current)\\data"
+pop_dc_MA=readRDS('data\\pop_dc_MA_temp_area.rds')
+W=readRDS('data\\ma_mat.rds')
+# Y_raw=as.matrix(pop_dc_MA[,3:ncol(pop_dc_MA)])
+Y_raw=as.matrix(pop_dc_MA[,4:ncol(pop_dc_MA)]) ## With new variable population density
+Y_date=seq(as.Date('2020-01-22'),length.out = ncol(Y_raw),by='days')
+colnames(Y_raw)=format(Y_date,'%m/%d/%y')
+Y_raw[,c('11/26/20','12/25/20',"01/01/21")]=round(Y_raw[,c('11/27/20','12/26/20',"01/02/21")]/2)
+Y_raw[,c('11/27/20','12/26/20',"01/02/21")]=round(Y_raw[,c('11/27/20','12/26/20',"01/02/21")]/2)
+
+newdate_s=which(colnames(Y_raw)=='06/15/20')
+newdate_e=which(colnames(Y_raw)=="12/31/20")
+(newdate_e-newdate_s)
+Y=Y_raw[,newdate_s:newdate_e]
+
+
+T = ncol(Y); ## time
+n_region = nrow(Y);n_region;## Number of counties
+Xpop = (pop_dc_MA$pop);## population
+DOW = factor(weekdays(as.Date(colnames(Y),'%m/%d/%y')),levels = c("Monday","Tuesday",   "Wednesday", "Thursday",  "Friday",    "Saturday",  "Sunday"))
+logoffset = log(Xpop)
+Xden = log(pop_dc_MA$pop /pop_dc_MA$`dt$area`)
+Xdow = model.matrix(~DOW)
+
+stan_code_path = "stan code"
+spt_model_simple = stan_model(file =paste(stan_code_path,'\\CAR.stan',sep=''))
+time_window =50
+sim_num=48
+alpha_thres = 0.05
+
+Y_original = Y ## Copy of the true count
+Y_adapt = Y ## The true count might be replaced as the loop goes on
+day_last = ncol(Y_original)-time_window
+# day_last =100 # For testing
+T_window = time_window
+Xtime_tw = log(1:(T_window+1)+0.01) # tw:time window
+
+
+Compute_time =c()
+day_b = 1
+  day_e = day_b + time_window-1
+  Xdow_temp = Xdow[day_b:(day_e+1),]
+  Y_temp=cbind(Y_adapt[,day_b:day_e])
+  data0 = list(
+    T = T_window,
+    n = n_region,
+    Y = Y_temp,
+    Xdow = Xdow_temp,
+    Xtime = Xtime_tw,
+    Xden=Xden,
+    logoffset=logoffset,
+    W =W,
+    W_n = sum(W)/2
+  )
+  time_temp0 = Sys.time()
+  samples_temp = sampling(spt_model_simple,data=data0,chains=4, iter =2000,control = list(adapt_delta =0.9,max_treedepth = 15,metric='diag_e'))
+  time_diff_temp =as.numeric(Sys.time()-time_temp0)
+  Compute_time = c(Compute_time,time_diff_temp)
+
+samples_temp
+Compute_time
+```
+
+```{r}
+Compute_time =c()
+day_b = 50
+  day_e = day_b + time_window-1
+  Xdow_temp = Xdow[day_b:(day_e+1),]
+  Y_temp=cbind(Y_adapt[,day_b:day_e])
+  data0 = list(
+    T = T_window,
+    n = n_region,
+    Y = Y_temp,
+    Xdow = Xdow_temp,
+    Xtime = Xtime_tw,
+    Xden=Xden,
+    logoffset=logoffset,
+    W =W,
+    W_n = sum(W)/2
+  )
+  time_temp0 = Sys.time()
+  samples_temp = sampling(spt_model_simple,data=data0,chains=4, iter =2000,control = list(adapt_delta =0.9,max_treedepth = 15,metric='diag_e'))
+  time_diff_temp =as.numeric(Sys.time()-time_temp0)
+  Compute_time = c(Compute_time,time_diff_temp)
+  samples_temp
+Compute_time
+```
+
+
+```{r}
+Compute_time =c()
+day_b = 100
+  day_e = day_b + time_window-1
+  Xdow_temp = Xdow[day_b:(day_e+1),]
+  Y_temp=cbind(Y_adapt[,day_b:day_e])
+  data0 = list(
+    T = T_window,
+    n = n_region,
+    Y = Y_temp,
+    Xdow = Xdow_temp,
+    Xtime = Xtime_tw,
+    Xden=Xden,
+    logoffset=logoffset,
+    W =W,
+    W_n = sum(W)/2
+  )
+  time_temp0 = Sys.time()
+  samples_temp = sampling(spt_model_simple,data=data0,chains=4, iter =2000,control = list(adapt_delta =0.9,max_treedepth = 15,metric='diag_e'))
+  time_diff_temp =as.numeric(Sys.time()-time_temp0)
+  Compute_time = c(Compute_time,time_diff_temp)
+  samples_temp
+Compute_time
+```
+
+```{r}
+Compute_time =c()
+day_b = 150
+  day_e = day_b + time_window-1
+  Xdow_temp = Xdow[day_b:(day_e+1),]
+  Y_temp=cbind(Y_adapt[,day_b:day_e])
+  data0 = list(
+    T = T_window,
+    n = n_region,
+    Y = Y_temp,
+    Xdow = Xdow_temp,
+    Xtime = Xtime_tw,
+    Xden=Xden,
+    logoffset=logoffset,
+    W =W,
+    W_n = sum(W)/2
+  )
+  time_temp0 = Sys.time()
+  samples_temp = sampling(spt_model_simple,data=data0,chains=4, iter =2000,control = list(adapt_delta =0.9,max_treedepth = 15,metric='diag_e'))
+  time_diff_temp =as.numeric(Sys.time()-time_temp0)
+  Compute_time = c(Compute_time,time_diff_temp)
+  samples_temp
+Compute_time
+```
+

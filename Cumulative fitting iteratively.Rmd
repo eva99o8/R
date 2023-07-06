@@ -1,0 +1,204 @@
+---
+title: "spatio temporal outbreak detection"
+output: html_document
+---
+### Spatio - temporal outbreak detection on real data analysis
+
+```{r}
+library(rstan)
+options(mc.cores = parallel::detectCores())
+library(dplyr)
+library(ggplot2)
+library(bayesplot)
+library(Matrix)
+
+build_large_w <- function(W,t){
+    colnames(W) <- NULL
+    W <- as.matrix(W)
+    nrows <- nrow(W)
+    temp_matrix <- W
+    for(i in 1:(t-1)){
+        temp_matrix <- bdiag(temp_matrix,W)
+    }
+    temp_matrix <- as.matrix(temp_matrix)
+    M <- matrix(0,t,t)
+    diag(M[-nrow(M),-1]) <- 1; diag(M[-1,-nrow(M)]) <- 1
+    identity <- diag(nrows)
+    M <- kronecker(M,identity)
+    final_matrix <- temp_matrix + M
+    return(final_matrix)
+}
+```
+
+
+
+```{r}
+path_data= "R:\\Research problems\\JAGS\\Spatial temporal Bayesian hierarchical model\\outbreak_detection_marginalization(Latest)\\Favorite Baby!!\\data"
+pop_dc_MA=readRDS(paste(path_data,'\\','pop_dc_MA_temp_area.rds',sep=''))
+W=readRDS(paste(path_data,'\\','ma_mat.rds',sep=''))
+# Y_raw=as.matrix(pop_dc_MA[,3:ncol(pop_dc_MA)])
+Y_raw=as.matrix(pop_dc_MA[,4:ncol(pop_dc_MA)]) ## With new variable population density
+Y_date=seq(as.Date('2020-01-22'),length.out = ncol(Y_raw),by='days')
+colnames(Y_raw)=format(Y_date,'%m/%d/%y')
+Y_raw[,c('11/26/20','12/25/20',"01/01/21")]=round(Y_raw[,c('11/27/20','12/26/20',"01/02/21")]/2)
+Y_raw[,c('11/27/20','12/26/20',"01/02/21")]=round(Y_raw[,c('11/27/20','12/26/20',"01/02/21")]/2)
+
+newdate_s=which(colnames(Y_raw)=='06/15/20')
+# newdate_e=which(colnames(Y_raw)==colnames(Y_raw)[ncol(Y_raw)]) # default
+newdate_e=which(colnames(Y_raw)=="12/31/20")
+(newdate_e-newdate_s)
+Y=Y_raw[,newdate_s:newdate_e]
+
+## time
+T = ncol(Y);T
+## Number of counties
+n_region = nrow(Y);n_region
+## population
+Xpop = (pop_dc_MA$pop)
+
+
+Y_inci=c()
+denom_incident = 10^6
+for(n_region_i in seq_len(n_region)){
+  Y_inci_row_temp = round(Y[n_region_i,]/Xpop[n_region_i]*denom_incident)
+  Y_inci = rbind(Y_inci,Y_inci_row_temp)
+}
+
+rownames(Y_inci)=pop_dc_MA$subregion
+DOW = factor(weekdays(as.Date(colnames(Y),'%m/%d/%y')),levels = c("Monday","Tuesday",   "Wednesday", "Thursday",  "Friday",    "Saturday",  "Sunday"))
+```
+
+
+
+## Separate spatial error and temoral error
+```{r}
+stan_code_path = "R:\\Research problems\\JAGS\\Spatial temporal Bayesian hierarchical model\\outbreak_detection_marginalization(Latest)\\Favorite Baby!!\\stan code"
+stan_code_name_pool = c("CAR_with_multi_err_temp","CAR")
+stan_code_name = stan_code_name_pool[2]
+toy_model = stan_model(file = paste(stan_code_path,"\\",stan_code_name,".stan",sep=''))
+saveRDS(toy_model,file=paste(stan_code_path,'\\',stan_code_name,'.rds',sep=''))
+```
+
+
+```{r}
+t=21
+d_b =100;d_e = d_b+t-1
+T = ncol(cbind(Y[,d_b:(d_e)]))
+n =nrow(Y)
+logoffset = log(pop_dc_MA$pop)
+Xtime = log(1:(T+1)+0.01)
+Xdow = model.matrix(~DOW[d_b:(d_e+1)])
+Xden = log(pop_dc_MA$pop /pop_dc_MA$`dt$area`)
+data0 = list(
+  T=T,
+  n=n,
+  Y = cbind(Y[,d_b:(d_e)]),
+  Xdow = Xdow,
+  Xden = Xden,
+  Xtime = Xtime,
+  Xdow = Xdow,
+  logoffset = logoffset,
+  W = W,
+  W_n = sum(W)/2
+)
+
+toy_samples = sampling(toy_model,data=data0,chains=4, iter = 3000,control = list(adapt_delta =0.9,max_treedepth = 15,metric='diag_e'))
+# toy_samples = sampling(toy_model,data=data0,chains=4, iter = 4000,control = list(adapt_delta =0.9,max_treedepth = 15,metric='diag_e'),pars = 'err_spat',include=FALSE)
+
+```
+
+```{r}
+
+#### To save all the stan samples
+path_save_stan_rds= "R:\\Research problems\\JAGS\\Spatial temporal Bayesian hierarchical model\\outbreak_detection_marginalization(Latest)\\Favorite Baby!!\\Saved iterative stan rds"
+newfolder = c("Iterative Cumulative fitting")
+dir.create(paste(path_save_stan_rds,"\\",newfolder[1],sep=''))
+path_save_stan_rds_temp = paste(path_save_stan_rds,"\\",newfolder[1],sep='')
+####################################################################
+
+
+t_window_start = 30 ## Pilot non-outbreak window size
+mat_d  = matrix(0,n_region,t_window) ## Initialization of the anomaly matrix
+day_init =1
+
+Y_copy =Y
+vec_d_new = rep(0,n_region) ## Anomaly vector
+
+Dura = 0:169 ## Dura[Dura_i] + t_window is the total length of days in model fitting 
+for(Dura_i in seq_along(Dura)){
+  print(paste('We are working to predict the day ',day_init+t_window_start+Dura[Dura_i],'.',sep=''))
+  Y_temp  = round(Y_copy[,seq(day_init,length.out = t_window_start+Dura_i-1)])
+  
+   ## The size of Xdow_temp changing
+  Xdow_temp = model.matrix(~DOW[seq(day_init,length.out = t_window_start+Dura_i)]) ## One more row for prediction
+  ## Data to be fed into the model
+    data0 = list(
+  T = ncol(Y_temp),
+  n =nrow(Y_temp),
+  Y = Y_temp,
+  logoffset = logoffset,
+  Xden = Xden,
+  Xdow =Xdow_temp,
+  Xtime  = log(seq(day_init,length.out = t_window_start+Dura_i)+0.01), # One more element for prediction
+  W = W,
+  W_n = sum(W)/2
+)
+     sample_temp = sampling(toy_model,data=data0,chains=4, iter = 6000,control = list(adapt_delta =0.9,max_treedepth = 15,metric='diag_e'))
+     saveRDS(sample_temp,file = paste(path_save_stan_rds_temp,"\\For_day_",day_init+t_window_start+Dura_i-1,".rds",sep = ''))
+    
+     ###### Modifying the Y_copy based upon fitting.
+     EY_pred  = exp(apply(extract(sample_temp)$EY_pred))
+     vec_d_new =rep(NA,n_region) ### Anomaly probability vector
+       
+  for(n_region_i in 1:n_region){
+    vec_d_new[n_region_i] = mean(ppois(Y_copy[n_region_i,day_init+t_window_start+Dura[Dura_i]],lambda = EY_pred[,n_region_i],lower.tail = FALSE)<0.05) ### Computing anomaly probability
+  }
+     mat_d =cbind(mat_d,vec_d_new)
+     
+     ## Modifying the next day observations for Y
+     for(n_region_i in 1:n_region){
+       ind_temp = which(qpois(.95,lambda= EY_pred[,n_region_i])>Y_copy[n_region,day_init+t_window_start+Dura[Dura_i]])
+       EY_pred[ind_temp,n_region_i] = Y_copy[n_region_i,day_init+t_window_start+Dura[Dura_i]]        
+       Y_copy[n_region_i,day_init+t_window_start+Dura[Dura_i]] = mean(EY_pred[,n_region_i])
+     }
+  
+}
+
+
+```
+
+
+```{r}
+pars0 = c('b_dow','b_trend','b_den',"rho_temp","rho_spat","tau_temp","tau_spat")
+
+print(toy_samples,pars=c(pars0,c("err_spat","err_temp")))
+saveRDS(toy_samples,file=paste(path_data,'\\','toy_samples.rds',sep=''))
+mcmc_pairs(toy_samples,pars =  c('err_spat[1]','err_spat[2]','err_spat[3]'))
+mcmc_trace(toy_samples,pars = c('err_spat[1]','err_spat[2]','err_spat[3]'))
+
+mcmc_trace(toy_samples,regex_pars = pars0[1:5])
+mcmc_pairs(toy_samples,pars = pars0)
+
+mcmc_dens(toy_samples,regex_pars = 'Y_pred')
+
+Y[,121]
+exp(apply(extract(toy_samples,pars='EY_pred')$EY_pred,2,mean))
+round((apply(extract(toy_samples,pars='Y_pred')$Y_pred,2,mean)))
+round((apply(extract(toy_samples,pars='Y_pred')$Y_pred,2,sd)))
+get_p_val= function(Y,Y_pred_mat){
+  p_val = c()
+  for(i in 1:length(Y)){
+    p_val = c(p_val, mean(Y_pred_mat[,i]>Y[i]))
+  }
+  return(p_val)
+}
+
+mat = extract(toy_samples,pars="Y_pred",permuted=FALSE)
+View(mat[,,13])
+matplot(1:1500,mat[,,13],typ='l')
+ess_bulk(mat[,,13])
+ess_tail(mat[,,13])
+Rhat(mat[,,13])
+get_p_val(Y=Y[,130],Y_pred_mat =extract(toy_samples,pars='Y_pred')$Y_pred)
+get_p_val(Y=Y[,130],Y_pred_mat =exp(extract(toy_samples,pars='EY_pred')$EY_pred) )
+```

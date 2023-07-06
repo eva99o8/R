@@ -1,0 +1,142 @@
+---
+title: "July 14th"
+author: "Yifan Ma"
+date: '2022-07-14'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(mvtnorm)
+library(rstan)
+library(dplyr)
+library(posterior)
+options(mc.cores = parallel::detectCores())
+source(("user_defined_funcs.R"))
+source("Loading_real_data.R")
+source(("Y_sim_generate.R"))
+```
+
+
+```{r}
+logoffset = log(Xpop)
+Xtime = log(1:T+0.01) # b_time
+Xdow = model.matrix(~DOW) # b_dow
+Xden = log(pop_dc_MA$pop /pop_dc_MA$`dt$area`)
+```
+
+
+```{r}
+set.seed(07141)
+rho_temp=0.7; tau_temp = 1/0.3
+tau_spat = 1/0.7; rho_spat =0.9 
+#b_dow = c(-0.23,0.00, 0.16,0.13,0.14,-0.10,-0.29) #from true data
+b_wkday = runif(1,min = 0,max = 0.2)
+b_wkend = runif(1,min = -0.3,max = 0)
+b_dow = c(rep(b_wkend,1),rep(b_wkday,4),rep(b_wkend,2))
+
+b_trend = 0.3 
+b_den = 0.2
+delta = 1
+#cps = rpois(n_region,lambda = (T*.7))
+cps = c(123, 141, 120, 145, 142, 144, 152, 157, 134, 139, 144, 128, 137) # cps fixed for simulation
+
+
+list_sim_Y_cp = gen_Y_sim(Y=Y,W=W,Xpop=Xpop,Xdow=Xdow,Xden=Xden,rho_temp =rho_temp, tau_temp =tau_temp,
+          tau_spat = tau_spat, rho_spat =rho_spat,
+          b_dow = b_dow,
+          b_time = b_trend,
+          b_den = b_den,delta= delta,cps=cps)
+b_dow
+gen_diseaseplot(list_sim_Y_cp$Y_sim,region_names = rownames(W))
+```
+
+```{r}
+stan_code_path = "stan code"
+spt_model_simple = stan_model(file =paste(stan_code_path,'\\CAR.stan',sep=''))
+saveRDS(spt_model_simple,file =paste(stan_code_path,'\\CAR_stan.rds',sep='') )
+spt_model_simple = readRDS(file =paste(stan_code_path,'\\CAR_stan.rds',sep=''))
+
+time_window =30
+sim_num=48
+sim_save_path = paste("simulated rds\\sim_",
+                       sim_num,sep='')
+stan_samples_path = paste(sim_save_path,'\\stan_samples',sep='')
+dir.create(sim_save_path)
+dir.create(stan_samples_path)
+alpha_thres = 0.05
+
+Y_original = list_sim_Y_cp$Y_sim ## Copy of the true count
+Y_adapt = list_sim_Y_cp$Y_sim ## The true count might be replaced as the loop goes on
+day_last = ncol(Y_original)-time_window
+# day_last =100 # For testing
+T_window = time_window
+Xtime_tw = log(1:(T_window+1)+0.01) # tw:time window
+
+Y_pred_collection = Y_original[,1:T_window]
+Compute_time =c()
+# EY_pred_collection = array(NA,dim = c(n_iter*2,n_region,day_last))
+
+#for(day_b in 50:60){
+  day_b = 50
+  day_e = day_b + time_window-1
+  Xdow_temp = Xdow[day_b:(day_e+1),]
+  Y_temp=cbind(Y_adapt[,day_b:day_e])
+  data0 = list(
+    T = T_window,
+    n = n_region,
+    Y = Y_temp,
+    Xdow = Xdow_temp,
+    Xtime = Xtime_tw,
+    Xden=Xden,
+    logoffset=logoffset,
+    W =W,
+    W_n = sum(W)/2,
+    b_Xden_mean = 0, b_Xden_sd = sqrt(2),    
+    b_Xdow_mean = 0, b_Xdow_sd = sqrt(2), 
+    b_Xtime_mean = 0, b_Xtime_sd = sqrt(2),
+    tau_spat_alpha = 2, tau_spat_beta = 2,
+    tau_temp_alpha = 2, tau_temp_beta = 2,
+    rho_spat_alpha = 2, rho_spat_beta = 2,
+    rho_temp_alpha = 2, rho_temp_beta = 2
+
+  )
+  time_temp0 = Sys.time()
+  samples_temp = sampling(spt_model_simple,data=data0,chains=4, iter =2000,control = list(adapt_delta =0.9,max_treedepth = 15,metric='diag_e'))
+   time_diff_temp =as.numeric(Sys.time()-time_temp0)
+  Compute_time = c(Compute_time,time_diff_temp)
+  cat(paste("We are making prediction on day ",day_b+T_window," now!\n",sep=''))
+  check_hmc_diagnostics(samples_temp)
+  cat(paste("The smallest eff size of the current model is ",min(summary(samples_temp)$summary[,'n_eff']),"\n",sep=''))
+  filename_temp = paste(sim_save_path,"\\stan_samples\\samples_day_",day_b,'.rds',sep='')
+  saveRDS(samples_temp,file=filename_temp)
+  pred_temp = extract(samples_temp,pars = c('EY_pred'))
+  ## Collecting predictions
+  EY_pred_temp = exp(apply(pred_temp$EY_pred,2,mean))
+  Y_pred_collection = cbind(Y_pred_collection,EY_pred_temp)
+  
+  ### update the fitting for the next round
+  Y_next_true = Y_original[,day_e+1]
+  crit_bool_temp = ppois(Y_next_true,lambda = EY_pred_temp,lower.tail = FALSE)>alpha_thres
+  Y_update_vec = Y_next_true*crit_bool_temp + round(EY_pred_temp)*(1-crit_bool_temp) ## Adjusting for large p-value
+  Y_adapt[,day_e+1] = Y_update_vec
+  next_prior = summarise_draws(as_draws_df(samples_temp))
+  b_wkday_mean = next_prior[1,2];b_wkday_sd = next_prior[1,4]
+  b_wkend_mean = next_prior[2,2];b_wkend_sd = next_prior[2,4]
+  b_den_mean = next_prior[3,2];  b_den_sd = next_prior[3,4]
+  b_trend_mean = next_prior[4,2];b_trend_sd = next_prior[4,4]
+  tau_spat_alpha = 2+ (next_prior[7,2]/next_prior[7,4])^2; 
+  tau_spat_beta = next_prior[7,2]+ (next_prior[7,2])^3/(next_prior[7,4])^2;
+  tau_temp_alpha = (next_prior[8,2]/next_prior[8,4])^2;
+  tau_temp_beta = next_prior[8,2]/(next_prior[8,4]^2)
+#}  
+data_involved_collection = list(Y_raw = Y_original,
+                                Y_adapt = Y_adapt,
+                                Y_pred = Y_pred_collection,
+                                Compute_time = Compute_time
+                                )
+gen_diseaseplot(Y_pred_collection,region_names = rownames(W))
+gen_diseaseplot(list_sim_Y_cp$Y_sim,region_names = rownames(W))
+
+saveRDS(data_involved_collection,file=paste(sim_save_path,'\\data_involved_collection.rds',sep=''))
+```
